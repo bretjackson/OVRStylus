@@ -1,0 +1,309 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index bb5cd42c..7e53557f 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -1114,6 +1114,7 @@ set(VRPN_SERVER_SOURCES
+ 	vrpn_nikon_controls.C
+ 	vrpn_nVidia_shield_controller.C
+ 	vrpn_Oculus.C
++	vrpn_OVRStylus.C
+ 	vrpn_OzzMaker.C
+ 	vrpn_OmegaTemperature.C
+ 	vrpn_Poser_Analog.C
+@@ -1228,6 +1229,7 @@ set(VRPN_SERVER_PUBLIC_HEADERS
+ 	vrpn_Oculus.h
+ 	vrpn_OmegaTemperature.h
+ 	vrpn_OneEuroFilter.h
++	vrpn_OVRStylus.h
+ 	vrpn_OzzMaker.h
+ 	vrpn_Poser_Analog.h
+ 	vrpn_Poser.h
+diff --git a/server_src/vrpn_Generic_server_object.C b/server_src/vrpn_Generic_server_object.C
+index 24b9675e..b7076918 100644
+--- a/server_src/vrpn_Generic_server_object.C
++++ b/server_src/vrpn_Generic_server_object.C
+@@ -60,6 +60,7 @@
+ #include "vrpn_nVidia_shield_controller.h"
+ #include "vrpn_Oculus.h"           // for vrpn_Oculus
+ #include "vrpn_OmegaTemperature.h" // for vrpn_OmegaTemperature
++#include "vrpn_OVRStylus.h"
+ #include "vrpn_OzzMaker.h"   // for vrpn_OzzMaker_BerryIMU
+ #include "vrpn_Phantom.h"
+ #include "vrpn_Poser_Analog.h"          // for vrpn_Poser_AnalogParam, etc
+@@ -1360,6 +1361,26 @@ int vrpn_Generic_Server_Object::setup_Tracker_NovintFalcon(
+ #endif
+ }
+ 
++//================================
++int vrpn_Generic_Server_Object::setup_OVRStylus(char *&pch, char *line,
++  FILE * /*config_file*/)
++{
++  char s2[LINESIZE], s3[LINESIZE];
++  int i1, i2;
++  VRPN_CONFIG_NEXT();
++  // Get the arguments (class, OVRStylus_name, port)
++  if (sscanf(pch, "%511s%511s", s2, s3) != 2) {
++    fprintf(stderr, "Bad vrpn_OVRStylus line: %s\nExpecting OVRStylus_name, port", line);
++    return -1;
++  }
++  // Open the box
++  if (verbose)
++    printf("Opening vrpn_OVRStylus: %s on port %s, baud %d",
++    s2, s3, 115200);
++  _devices->add(new vrpn_OVRStylus(s2, connection, s3, 115200, 2));
++  return 0;
++}
++
+ int vrpn_Generic_Server_Object::setup_Tracker_Fastrak(char *&pch, char *line,
+                                                       FILE *config_file)
+ {
+@@ -5645,6 +5666,9 @@ vrpn_Generic_Server_Object::vrpn_Generic_Server_Object(
+                 else if (VRPN_ISIT("vrpn_Freespace")) {
+                     VRPN_CHECK(setup_Freespace);
+                 }
++                else if (VRPN_ISIT("vrpn_OVRStylus")) {
++                    VRPN_CHECK(setup_OVRStylus);
++                }
+                 else if (VRPN_ISIT("vrpn_Tracker_NovintFalcon")) {
+                     VRPN_CHECK(setup_Tracker_NovintFalcon);
+                 }
+diff --git a/server_src/vrpn_Generic_server_object.h b/server_src/vrpn_Generic_server_object.h
+index 5c2bb385..7c9c2db8 100644
+--- a/server_src/vrpn_Generic_server_object.h
++++ b/server_src/vrpn_Generic_server_object.h
+@@ -172,6 +172,8 @@ protected:
+     int setup_OzzMaker_BerryIMU(char *&pch, char *line, FILE *config_file);
+     int setup_Laputa(char *&pch, char *line, FILE *config_file);
+     int setup_Vality_vGlass(char *&pch, char *line, FILE *config_file);
++    int setup_OVRStylus(char *&pch, char *line,
++                        FILE *config_file);
+ 
+     template <typename T>
+     int templated_setup_device_name_only(char *&pch, char *line, FILE *);
+diff --git a/vrpn_OVRStylus.C b/vrpn_OVRStylus.C
+new file mode 100644
+index 00000000..f92d267a
+--- /dev/null
++++ b/vrpn_OVRStylus.C
+@@ -0,0 +1,165 @@
++// vrpn_OVRStylus.C: VRPN driver for OVR Stylus
++
++
++#include <stdio.h>                      // for fprintf, stderr, printf
++
++#include "vrpn_BaseClass.h"             // for ::vrpn_TEXT_WARNING, etc
++#include "vrpn_Serial.h"
++#include "vrpn_Shared.h"                // for timeval, vrpn_gettimeofday
++#include "vrpn_OVRStylus.h"
++//#include <fcntl.h>
++//#include <stdlib.h>
++//#if !defined(_WIN32)
++//#include <sys/ioctl.h>
++//#include <unistd.h>
++//#endif
++//#include <string.h>
++
++#define VRPN_TIMESTAMP_MEMBER _timestamp // Configuration required for vrpn_MessageMacros in this class.
++#include "vrpn_MessageMacros.h"         // for VRPN_MSG_INFO, VRPN_MSG_WARNING, VRPN_MSG_ERROR
++
++#define MAX_OVRSTYLUS_BUTTONS  2
++
++
++// analog status flags
++//vrpn_ANALOG_SYNCING = (2); Looking for the first character of report
++//vrpn_ANALOG_REPORT_READY = (1); New message is ready to report
++//vrpn_ANALOG_PARTIAL = (0); Still reading report
++//vrpn_ANALOG_FAIL = (-2); Error received
++
++vrpn_OVRStylus::vrpn_OVRStylus(const char * name,
++                               vrpn_Connection * c,
++                               const char * port,
++                               int baud/* = 115200*/,
++                               const int numbuttons/* = 2*/) :
++vrpn_Serial_Analog(name, c, port, baud),
++vrpn_Button_Filter(name, c)
++{
++    if (numbuttons > MAX_OVRSTYLUS_BUTTONS) {
++        fprintf(stderr,"vrpn_OVRSTYLUS: Can only support %d buttons, not %d\n", (int)MAX_OVRSTYLUS_BUTTONS, (int)numbuttons);
++        vrpn_Button::num_buttons = MAX_OVRSTYLUS_BUTTONS;
++    }
++    else {
++        vrpn_Button::num_buttons = numbuttons;
++    }
++    
++    vrpn_Analog::num_channel = 1;
++    
++    clear_values();
++    
++    _num_read = 0;
++    _expectedNumChars = 1;
++    _messageStartByte = '!';
++    
++    status = vrpn_ANALOG_SYNCING;
++}
++
++vrpn_OVRStylus::~vrpn_OVRStylus()
++{
++}
++
++void vrpn_OVRStylus::sendHapticCommand(uint8_t hapticEffectID)
++{
++    if (hapticEffectID >= 1 && hapticEffectID <= 123){
++        unsigned char msg[2];
++        sprintf((char*)msg, "%u\n", hapticEffectID);
++        vrpn_write_characters(serial_fd, &msg[0], 2);
++    }
++    else {
++        VRPN_MSG_WARNING("Error sending haptic command. Effect id must be between 1-123 inclusive");
++    }
++}
++
++void vrpn_OVRStylus::clear_values()
++{
++    // Initialize the state of all the buttons
++    memset(vrpn_Button::buttons, 0, sizeof(vrpn_Button::buttons));
++    memset(vrpn_Button::lastbuttons, 0, sizeof(vrpn_Button::lastbuttons));
++    
++    vrpn_Analog::channel[0] = vrpn_Analog::last[0] = 0;
++}
++
++void vrpn_OVRStylus::mainloop()
++{
++    get_report();
++    server_mainloop();
++    vrpn_gettimeofday(&_timestamp, NULL);
++}
++
++void vrpn_OVRStylus::report_changes(vrpn_uint32 class_of_service)
++{
++    vrpn_Analog::timestamp = _timestamp;
++    vrpn_Button::timestamp = _timestamp;
++    
++    vrpn_Analog::report_changes(class_of_service);
++    vrpn_Button::report_changes();
++}
++
++void    vrpn_OVRStylus::report(vrpn_uint32 class_of_service)
++{
++    vrpn_Analog::timestamp = _timestamp;
++    vrpn_Button::timestamp = _timestamp;
++    
++    vrpn_Analog::report(class_of_service);
++    vrpn_Button::report_changes();
++}
++
++void vrpn_OVRStylus::get_report()
++{
++    int i;
++    
++    if (status == vrpn_ANALOG_SYNCING) {
++        if (1 == vrpn_read_available_characters(serial_fd, buffer, 1)) {
++            // if not a record start, we have an error
++            if (buffer[0] != _messageStartByte) {
++                VRPN_MSG_WARNING("Error reading OVRStylus data stream, finding start byte");
++                return;
++            }
++            
++            // we got a good start byte... we're reading now
++            _num_read = 0;   //< Ignore the status byte for the following record
++            status = vrpn_ANALOG_PARTIAL;
++        }
++    }
++    if (status == vrpn_ANALOG_PARTIAL){
++        // we broke out.. if we're not reading, then we have nothing to do
++        
++        // we're reading now, get the report
++        // get the expected number of data record bytes
++        int result = vrpn_read_available_characters(serial_fd,
++                                                    &buffer[_num_read], _expectedNumChars-_num_read);
++        
++        if (result < 0) {
++            VRPN_MSG_WARNING("Error reading OVRStylus data stream");
++            status = vrpn_ANALOG_SYNCING;
++            return;
++        }
++        _num_read += result;
++        // If we don't have a full record, go back again.
++        if (_num_read < _expectedNumChars) {
++            return;
++        }
++        
++        
++        
++        for (i = 0; i < num_buttons; i++) {
++            lastbuttons[i] = buttons[i];
++        }
++        
++        buttons[0] = static_cast<unsigned char>((buffer[0] & (1 << 7)) ? VRPN_BUTTON_ON : VRPN_BUTTON_OFF);
++        buttons[1] = static_cast<unsigned char>((buffer[0] & (1 << 6)) ? VRPN_BUTTON_ON : VRPN_BUTTON_OFF);
++        
++        
++        // here is where we decode the analog stuff
++        vrpn_Analog::last[0] = vrpn_Analog::channel[0];
++        vrpn_Analog::channel[0] = buffer[0] & ((1 << 6) - 1); // create a mask for the lowest 6 bits to hold the softpot value
++        
++        
++        status = vrpn_ANALOG_REPORT_READY;
++        
++        report_changes();
++        
++        status = vrpn_ANALOG_SYNCING;
++    }
++}
++
+diff --git a/vrpn_OVRStylus.h b/vrpn_OVRStylus.h
+new file mode 100644
+index 00000000..7d5dc4c8
+--- /dev/null
++++ b/vrpn_OVRStylus.h
+@@ -0,0 +1,50 @@
++#ifndef VRPN_OVRSTYLUS_H
++#define VRPN_OVRSTYLUS_H
++
++#include "vrpn_Analog.h"                // for vrpn_Serial_Analog
++#include "vrpn_Button.h"                // for vrpn_Button_Filter
++#include "vrpn_Configure.h"             // for VRPN_API
++#include "vrpn_Connection.h"            // for vrpn_CONNECTION_LOW_LATENCY, etc
++#include "vrpn_Shared.h"                // for timeval
++#include "vrpn_Types.h"                 // for vrpn_uint32
++
++// Device drivers for the OVR Stylus
++
++class VRPN_API vrpn_OVRStylus: public vrpn_Serial_Analog,
++             public vrpn_Button_Filter
++{
++public:
++	vrpn_OVRStylus(const char * name, 
++		       vrpn_Connection * c,
++		       const char * port, 
++		       int baud = 115200,
++		       const int numbuttons = 2);
++
++	virtual ~vrpn_OVRStylus();
++
++	virtual void mainloop();
++    
++    //Tells the DRV2605 LRA haptic driver on the stylus to play
++    // a specific haptic waveform effect. Id's range from 1-123
++    // with descriptions: https://cdn-shop.adafruit.com/datasheets/DRV2605.pdf
++    virtual void sendHapticCommand(uint8_t hapticEffectID);
++
++protected:
++	int _num_read;
++	int _expectedNumChars;	// How many characters to expect in the report
++	struct timeval _timestamp;	// Time of the last report from the device
++	unsigned char _messageStartByte;
++    virtual void clear_values(void);    // Set all buttons, analogs back to 0
++	 virtual void get_report(void);    // Try to read a report from the device
++
++	// send report iff changed
++    virtual void report_changes (vrpn_uint32 class_of_service = vrpn_CONNECTION_LOW_LATENCY);
++    // send report whether or not changed
++    virtual void report (vrpn_uint32 class_of_service = vrpn_CONNECTION_LOW_LATENCY);
++    // NOTE:  class_of_service is only applied to vrpn_Analog
++    //  values, not vrpn_Button or vrpn_Dial
++    
++};
++// end of VRPN_OVRSTYLUS_H
++#endif
++
