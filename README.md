@@ -1,5 +1,7 @@
 # OVR Stylus
 
+![Picture of a user holding the OVR Stylus](Documentation/OVRStylus.png)
+
 The OVR Stylus is an open-source software/hardware design for a 3D input stylus used in virtual and augmented reality applications. With a touch pad, two input buttons, LRA-based vibrotactile haptic feedback, and Bluetooth communication, the 3D-printed prop’s light-weight design (35g) enables creative and precise interaction.
 
 A paper describing the implementation was published at the [Workshop on Novel Input Devices and Interaction Techniques](https://sites.google.com/view/nidit) at the IEEE Virtual Reality 2020 conference. 
@@ -15,6 +17,8 @@ This repository archives the files needed to create your own OVR Stylus or to cr
 * **/VRPN** - Patch file and stylus classes to integrate with the [VRPN library](https://github.com/vrpn/vrpn)
 
 ### Hardware Manufacture
+
+![Stylus Components](Documentation/stylus-pcb.png)
 
 #### PCB
 
